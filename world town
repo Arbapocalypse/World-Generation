@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Little Town — Infinite Top-Down RPG</title>
+<style>
+:root{color-scheme:dark;--panel:rgba(18,25,34,.94);--line:#465260;--text:#f3f4f6;--muted:#c0cad4}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#18212a;color:var(--text);font:14px/1.4 system-ui,-apple-system,Segoe UI,sans-serif}
+canvas{display:block;width:100%;height:100%;touch-action:none;image-rendering:pixelated}
+.panel{position:fixed;z-index:2;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:11px 13px;box-shadow:0 8px 28px #0005}
+#hud{left:12px;top:12px;width:min(355px,calc(100vw - 24px))}
+h1{font-size:16px;margin:0 0 4px}#status{color:var(--muted);font-size:12px}
+#message{margin-top:7px;min-height:18px;color:#f6d58b;font-size:12px}
+#legend{display:flex;flex-wrap:wrap;gap:5px 10px;margin-top:8px;font-size:11px;color:#e5e7eb}
+.swatch{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+#help{right:12px;top:12px;width:230px;font-size:12px;color:var(--muted)}#help strong{color:white}
+#buttons{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+button{font:inherit;color:white;background:#273444;border:1px solid #586779;border-radius:8px;padding:7px 9px;cursor:pointer;touch-action:manipulation}
+button:active{background:#40536a}
+#mobile{position:fixed;z-index:3;bottom:max(14px,env(safe-area-inset-bottom));left:14px;display:grid;grid-template-columns:repeat(3,48px);grid-template-rows:repeat(2,44px);gap:4px}
+#mobile button{font-size:19px;padding:0;background:#17212beF}
+#up{grid-column:2;grid-row:1}#left{grid-column:1;grid-row:2}#down{grid-column:2;grid-row:2}#right{grid-column:3;grid-row:2}
+#actions{position:fixed;z-index:3;right:14px;bottom:max(18px,env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:6px}
+#actions button{min-width:104px;background:#17212bef}
+@media(max-width:650px){#help{top:auto;bottom:125px;right:10px;width:175px}#hud{top:9px;left:9px;width:min(330px,calc(100vw - 18px))}#legend{max-width:290px;gap:4px 8px}h1{font-size:14px}}
+</style>
+</head>
+<body>
+<canvas id="game" aria-label="Infinite town game"></canvas>
+<section id="hud" class="panel">
+  <h1>Little Town</h1>
+  <div id="status">Generating town…</div>
+  <div id="legend">
+    <span><i class="swatch" style="background:#59616a"></i>Road</span>
+    <span><i class="swatch" style="background:#b9b7a9"></i>Sidewalk</span>
+    <span><i class="swatch" style="background:#6b9c5a"></i>Grass</span>
+    <span><i class="swatch" style="background:#398db6"></i>Water</span>
+    <span><i class="swatch" style="background:#8d654b"></i>House</span>
+  </div>
+  <div id="message">Find a house and stand beside its door. Press E to enter.</div>
+  <div id="buttons"><button id="newTown">New town</button><button id="home">Return to start</button></div>
+</section>
+<aside id="help" class="panel">
+  <strong>Explore the town</strong><br>
+  Move: <strong>WASD / arrows</strong><br>
+  Interact / enter / loot / rest: <strong>E</strong><br>
+  Break an adjacent wall: <strong>X</strong><br>
+  <span>Doors and windows are entry points. Furniture has different interactions.</span>
+</aside>
+<nav id="mobile" aria-label="Movement controls">
+  <button id="up" aria-label="Move up">▲</button><button id="left" aria-label="Move left">◀</button>
+  <button id="down" aria-label="Move down">▼</button><button id="right" aria-label="Move right">▶</button>
+</nav>
+<div id="actions"><button id="interact">E · Interact</button><button id="break">X · Break wall</button></div>
+<script>
+(() => {
+'use strict';
+const canvas=document.getElementById('game'),ctx=canvas.getContext('2d');
+const statusEl=document.getElementById('status'),messageEl=document.getElementById('message');
+const TILE=32, BLOCK=24;
+let seed=Math.floor(Math.random()*999999)+1, player={x:3,y:3}, mode='town', homeBlock={x:0,y:0}, interior={x:5,y:7}, inventory={food:0,items:0}, energy=100;
+let vw=innerWidth,vh=innerHeight,dpr=1,lastMessage='',messageUntil=0;
+const brokenWalls=new Set(),looted=new Set(),rested=new Set();
+const colors={road:'#59616a',sidewalk:'#b9b7a9',grass:'#6b9c5a',water:'#398db6',bridge:'#9c8061',wall:'#8d654b',wall2:'#a47758',floor:'#c8b58d',door:'#63402c',window:'#83c6d5',rubble:'#69615b',bed:'#9f5962',kitchen:'#7d8c91',table:'#956d45',chair:'#b78b5a',sofa:'#557d8b',plant:'#3c7946'};
+function hash(x,y,s=0){let h=(Math.imul(x^(seed+s),374761393)+Math.imul(y,668265263))|0;h=Math.imul(h^(h>>>13),1274126177);return ((h^(h>>>16))>>>0)/4294967295}
+function noise(x,y,scale,salt=0){let gx=Math.floor(x/scale),gy=Math.floor(y/scale),fx=x/scale-gx,fy=y/scale-gy;fx=fx*fx*(3-2*fx);fy=fy*fy*(3-2*fy);let a=hash(gx,gy,salt),b=hash(gx+1,gy,salt),c=hash(gx,gy+1,salt),d=hash(gx+1,gy+1,salt);return (a+(b-a)*fx)*(1-fy)+(c+(d-c)*fx)*fy}
+function mod(n,m){return ((n%m)+m)%m}
+function blockInfo(x,y){const bx=Math.floor(x/BLOCK),by=Math.floor(y/BLOCK);return {bx,by,lx:mod(x,BLOCK),ly:mod(y,BLOCK)}}
+function houseFor(bx,by){const r=hash(bx,by,20);return {x:5+Math.floor(r*3),y:5+Math.floor(hash(bx,by,21)*3),w:11+Math.floor(hash(bx,by,22)*3),h:9+Math.floor(hash(bx,by,23)*3)}}
+function houseTile(x,y){
+ const b=blockInfo(x,y),{bx,by,lx,ly}=b;
+ // Roads form a repeating grid; blocks have sidewalks on their edges.
+ if(lx<=1||ly<=1)return null;
+ if(lx===2||ly===2)return {type:'sidewalk',solid:false};
+ const house=houseFor(bx,by),hx=house.x,hy=house.y,hw=house.w,hh=house.h;
+ if(lx>=hx-1&&lx<=hx+hw&&ly>=hy-1&&ly<=hy+hh){
+   const left=lx===hx-1,right=lx===hx+hw,top=ly===hy-1,bottom=ly===hy+hh;
+   const inside=lx>=hx&&lx<hx+hw&&ly>=hy&&ly<hy+hh;
+   if(inside)return {type:'grass',solid:false};
+   if(left||right||top||bottom){
+     const key=`${bx},${by},${lx},${ly}`;
+     if(brokenWalls.has(key))return {type:'rubble',solid:false,breach:true,bx,by,lx,ly};
+     // Front door is on the bottom wall; windows are on other wall sections.
+     const doorX=hx+Math.floor(hw/2);
+     const isDoor=bottom&&lx===doorX;
+     const isWindow=!isDoor&&((top&&lx>hx+1&&lx<hx+hw-1&&(lx-hx)%3===0)||(bottom&&lx>hx+1&&lx<hx+hw-1&&(lx-hx)%4===0)||(left||right)&&ly>hy+1&&ly<hy+hh-1&&(ly-hy)%3===0);
+     return {type:isDoor?'door':isWindow?'window':'wall',solid:!isDoor&&!isWindow,bx,by,lx,ly,door:isDoor,window:isWindow,house};
+   }
+ }
+ // A few natural water channels cross the world; roads crossing them become bridges.
+ const riverY=Math.floor(by*BLOCK + 11 + Math.sin((x+seed%50)/11)*2.4);
+ const river=hash(bx,by,60)>.80 && Math.abs(y-riverY)<2 && lx>2;
+ if(river){
+   if(lx<=1)return {type:'bridge',solid:false};
+   return {type:'water',solid:true};
+ }
+ // Park patches and ordinary grass in open spaces.
+ if(hash(bx,by,70)>.72 && lx>3&&ly>3&&lx<20&&ly<20)return {type:'grass',solid:false,park:true};
+ return {type:'grass',solid:false};
+}
+function townTile(x,y){
+ const b=blockInfo(x,y);
+ if(b.lx===0||b.lx===1||b.ly===0||b.ly===1){
+   // Road cells may contain a water channel; crossing at the road is a bridge.
+   const ry=Math.floor(b.by*BLOCK+11+Math.sin((x+seed%50)/11)*2.4);
+   if(hash(b.bx,b.by,60)>.80&&Math.abs(y-ry)<2)return {type:'bridge',solid:false};
+   return {type:'road',solid:false};
+ }
+ return houseTile(x,y)||{type:'grass',solid:false};
+}
+function tileAt(x,y){if(mode==='interior')return interiorTile(x,y);return townTile(x,y)}
+function interiorTile(x,y){
+ const W=13,H=10;
+ if(x<0||y<0||x>=W||y>=H)return {type:'wall',solid:true};
+ if(x===0||y===0||x===W-1||y===H-1){
+   if(x===6&&y===H-1)return {type:'door',solid:false,exit:true};
+   if((y===0&&x===3)||(y===0&&x===9)||(x===0&&y===4)||(x===W-1&&y===5))return {type:'window',solid:false,window:true};
+   return {type:'wall',solid:true};
+ }
+ // Interior furniture and points of interest.
+ if(x===2&&y===2)return {type:'bed',solid:true,action:'bed'};
+ if(x===3&&y===2)return {type:'bed',solid:true,action:'bed'};
+ if(x>=8&&x<=10&&y===2)return {type:'kitchen',solid:true,action:'kitchen'};
+ if(x===9&&y===3)return {type:'kitchen',solid:true,action:'kitchen'};
+ if(x===5&&y===4)return {type:'table',solid:true,action:'table'};
+ if(x===4&&y===5)return {type:'chair',solid:true,action:'rest'};
+ if(x===6&&y===5)return {type:'chair',solid:true,action:'rest'};
+ if(x===2&&y===6)return {type:'sofa',solid:true,action:'rest'};
+ if(x===10&&y===6)return {type:'plant',solid:true,action:'plant'};
+ return {type:'floor',solid:false};
+}
+function msg(s){messageEl.textContent=s;messageUntil=Date.now()+5500}
+function houseKey(bx,by){return `${bx},${by}`}
+function enterHouse(bx,by,entryType='door'){
+ mode='interior';homeBlock={x:bx,y:by};interior={x:6,y:7};msg(entryType==='window'?'You climb through the window. Press E near the bottom door to leave.':'You enter the house. Explore, rest, and search the kitchen.');render()}
+function exitHouse(){mode='town';const h=houseFor(homeBlock.x,homeBlock.y);player.x=homeBlock.x*BLOCK+h.x+Math.floor(h.w/2);player.y=homeBlock.y*BLOCK+h.y+h.h+1;msg('You step outside.');render()}
+function nearby(dx,dy){const x=(mode==='interior'?interior.x:player.x)+dx,y=(mode==='interior'?interior.y:player.y)+dy;return {x,y,t:tileAt(x,y)}}
+function interact(){
+ if(mode==='interior'){
+   const dirs=[[0,0],[0,-1],[1,0],[-1,0],[0,1]];
+   for(const [dx,dy] of dirs){const p=nearby(dx,dy),t=p.t;
+     if(t.exit){exitHouse();return}
+     if(t.action==='kitchen'){const key=`${homeBlock.x},${homeBlock.y},kitchen`;if(looted.has(key)){msg('The kitchen drawers are empty.')}else{looted.add(key);inventory.food+=1;inventory.items+=1;msg('You searched the kitchen: found 1 food and 1 useful item.')}render();return}
+     if(t.action==='bed'){energy=100;msg('You slept in the bed. Energy restored to 100%.');render();return}
+     if(t.action==='rest'){energy=Math.min(100,energy+25);msg('You rested for a moment. Energy: '+energy+'%.');render();return}
+     if(t.action==='table'){msg('A sturdy dining table. Nothing to collect here.');return}
+     if(t.action==='plant'){msg('A leafy houseplant. It looks healthy.');return}
+     if(t.window){msg('You can climb out through this window.');return}
+   }
+   msg('Nothing nearby to interact with.');return;
+ }
+ // Check current tile and adjacent tiles for an entrance or a wall breach.
+ const dirs=[[0,0],[0,-1],[1,0],[-1,0],[0,1]];
+ for(const [dx,dy] of dirs){const p=nearby(dx,dy),t=p.t;
+   if(t.door){enterHouse(t.bx,t.by,'door');return}
+   if(t.window){enterHouse(t.bx,t.by,'window');return}
+   if(t.breach){
+     const b=blockInfo(p.x,p.y),h=houseFor(b.bx,b.by);
+     mode='interior';homeBlock={x:b.bx,y:b.by};interior={x: b.lx<h.x?1:b.lx>=h.x+h.w?11:b.lx, y:b.ly<h.y?1:b.ly>=h.y+h.h?8:b.ly};
+     interior.x=Math.max(1,Math.min(11,interior.x));interior.y=Math.max(1,Math.min(8,interior.y));
+     msg('You squeeze through the broken wall.');render();return;
+   }
+ }
+ msg('No door or window nearby. Press X beside a wall to break through.');}
+function breakWall(){
+ if(mode!=='town'){msg('You can only break exterior walls from outside.');return}
+ const dirs=[[0,-1],[1,0],[0,1],[-1,0]];
+ for(const [dx,dy] of dirs){const p=nearby(dx,dy),t=p.t;if(t.type==='wall'){
+   const key=`${t.bx},${t.by},${blockInfo(p.x,p.y).lx},${blockInfo(p.x,p.y).ly}`;
+   brokenWalls.add(key);msg('You broke a wall tile. Move beside the opening and press E to enter.');render();return;
+ }}
+ msg('Stand next to a house wall to break it.');}
+function move(dx,dy){
+ const pos=mode==='interior'?interior:player,nx=pos.x+dx,ny=pos.y+dy,t=tileAt(nx,ny);
+ if(!t.solid){
+   if(mode==='interior'){
+     if(t.exit){interior.x=nx;interior.y=ny;exitHouse();return}
+     interior.x=nx;interior.y=ny;
+   }else{player.x=nx;player.y=ny;}
+ } else {msg(t.type==='water'?'The water is too deep to cross here.':t.type==='wall'?'A wall blocks your way. Press X to break it.':t.type==='mountain'?'Blocked.':'Something is in the way.');}
+ render();
+}
+const keyMap={ArrowUp:[0,-1],w:[0,-1],W:[0,-1],ArrowDown:[0,1],s:[0,1],S:[0,1],ArrowLeft:[-1,0],a:[-1,0],A:[-1,0],ArrowRight:[1,0],d:[1,0],D:[1,0]};
+window.addEventListener('keydown',e=>{if(keyMap[e.key]){e.preventDefault();move(...keyMap[e.key])}else if(e.key.toLowerCase()==='e'){e.preventDefault();interact()}else if(e.key.toLowerCase()==='x'){e.preventDefault();breakWall()}},{passive:false});
+[['up',0,-1],['down',0,1],['left',-1,0],['right',1,0]].forEach(([id,dx,dy])=>document.getElementById(id).addEventListener('click',()=>move(dx,dy)));
+document.getElementById('interact').addEventListener('click',interact);document.getElementById('break').addEventListener('click',breakWall);
+function drawTile(t,px,py,wx,wy){
+ const type=t.type;let c=colors[type]||colors.grass;
+ ctx.fillStyle=c;ctx.fillRect(px,py,TILE+1,TILE+1);
+ const r=hash(wx,wy,88);
+ if(type==='road'){ctx.fillStyle='#747b83';if(mod(wy,6)===3)ctx.fillRect(px+5,py+15,8,2)}
+ if(type==='sidewalk'){ctx.strokeStyle='#aaa99e';ctx.lineWidth=1;ctx.strokeRect(px+1,py+1,TILE-2,TILE-2)}
+ if(type==='grass'){if(r>.5){ctx.fillStyle='#568a49';ctx.fillRect(px+6+r*10,py+7,3,3)}if(t.park&&r>.75){ctx.fillStyle='#347442';ctx.fillRect(px+12,py+8,8,13);ctx.fillStyle='#4b8d50';ctx.fillRect(px+8,py+4,16,12)}}
+ if(type==='water'){ctx.fillStyle='#72b9d5';ctx.fillRect(px+5,py+9+r*10,11,2)}
+ if(type==='bridge'){ctx.fillStyle='#735b48';for(let i=3;i<32;i+=8)ctx.fillRect(px+i,py,2,32);ctx.fillStyle='#c1a17b';ctx.fillRect(px,py+3,32,3);ctx.fillRect(px,py+26,32,3)}
+ if(type==='wall'){ctx.fillStyle='#6d4937';ctx.fillRect(px,py+1,32,3);ctx.fillRect(px,py+15,32,2);ctx.strokeStyle='#b28664';ctx.strokeRect(px+1,py+1,30,30)}
+ if(type==='door'){ctx.fillStyle='#563925';ctx.fillRect(px+5,py+2,22,30);ctx.fillStyle='#c6a06c';ctx.fillRect(px+21,py+16,3,3)}
+ if(type==='window'){ctx.fillStyle='#624c3b';ctx.fillRect(px+3,py+5,26,22);ctx.fillStyle='#83d0df';ctx.fillRect(px+7,py+8,18,16);ctx.fillStyle='#e2e5d8';ctx.fillRect(px+15,py+8,2,16);ctx.fillRect(px+7,py+15,18,2)}
+ if(type==='rubble'){ctx.fillStyle='#4b4745';ctx.fillRect(px+5,py+10,8,7);ctx.fillRect(px+17,py+19,10,6)}
+ if(type==='floor'){ctx.strokeStyle='#b3a17e';ctx.lineWidth=.5;ctx.strokeRect(px+1,py+1,30,30)}
+ if(type==='bed'){ctx.fillStyle='#6e3e47';ctx.fillRect(px+3,py+3,26,26);ctx.fillStyle='#eee0c8';ctx.fillRect(px+5,py+5,22,8);ctx.fillStyle='#bd7880';ctx.fillRect(px+5,py+14,22,13)}
+ if(type==='kitchen'){ctx.fillStyle='#56656d';ctx.fillRect(px+2,py+2,28,28);ctx.fillStyle='#d4d8d7';ctx.fillRect(px+5,py+5,22,22);ctx.fillStyle='#73818a';ctx.fillRect(px+10,py+8,12,10)}
+ if(type==='table'){ctx.fillStyle='#6b4b32';ctx.fillRect(px+3,py+4,26,24);ctx.fillStyle='#ad8052';ctx.fillRect(px+5,py+6,22,20)}
+ if(type==='chair'){ctx.fillStyle='#855b38';ctx.fillRect(px+7,py+5,18,22);ctx.fillStyle='#c39861';ctx.fillRect(px+9,py+7,14,15)}
+ if(type==='sofa'){ctx.fillStyle='#365d69';ctx.fillRect(px+2,py+5,28,22);ctx.fillStyle='#6b9aa5';ctx.fillRect(px+6,py+8,20,16)}
+ if(type==='plant'){ctx.fillStyle='#5b4836';ctx.fillRect(px+10,py+18,12,9);ctx.fillStyle='#347844';ctx.fillRect(px+8,py+5,16,16);ctx.fillStyle='#69a65c';ctx.fillRect(px+12,py+2,9,12)}
+}
+function drawPlayer(cx,cy){ctx.fillStyle='#1d2934';ctx.fillRect(cx-8,cy-7,16,17);ctx.fillStyle='#efc6a0';ctx.fillRect(cx-6,cy-12,12,10);ctx.fillStyle='#4769b0';ctx.fillRect(cx-8,cy+1,16,9);ctx.fillStyle='#f7f7f7';ctx.fillRect(cx-3,cy-8,2,2);ctx.fillRect(cx+2,cy-8,2,2)}
+function render(){
+ dpr=Math.min(window.devicePixelRatio||1,2);vw=innerWidth;vh=innerHeight;
+ canvas.width=Math.floor(vw*dpr);canvas.height=Math.floor(vh*dpr);canvas.style.width=vw+'px';canvas.style.height=vh+'px';
+ ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,vw,vh);
+ const p=mode==='interior'?interior:player;
+ const tilesX=Math.ceil(vw/TILE)+2,tilesY=Math.ceil(vh/TILE)+2;
+ const originX=Math.floor(p.x-tilesX/2),originY=Math.floor(p.y-tilesY/2);
+ const ox=Math.floor(vw/2-p.x*TILE),oy=Math.floor(vh/2-p.y*TILE);
+ for(let y=originY;y<originY+tilesY;y++)for(let x=originX;x<originX+tilesX;x++){
+   let t;
+   if(mode==='interior')t=interiorTile(x,y);
+   else t=townTile(x,y);
+   drawTile(t,x*TILE+ox,y*TILE+oy,x,y);
+ }
+ drawPlayer(Math.floor(vw/2),Math.floor(vh/2));
+ const coords=mode==='interior'?`House interior · Energy ${energy}%`:`Tile (${player.x}, ${player.y})`;
+ statusEl.textContent=`Seed ${seed} · ${mode==='interior'?'Inside house':'Town'} · ${coords} · Food ${inventory.food} · Items ${inventory.items}`;
+ if(Date.now()>messageUntil&&mode==='town')messageEl.textContent='Find a house and stand beside its door. Press E to enter.';
+}
+function spawn(){player={x:3,y:3};mode='town';interior={x:6,y:7};}
+document.getElementById('newTown').addEventListener('click',()=>{seed=Math.floor(Math.random()*999999)+1;brokenWalls.clear();looted.clear();rested.clear();inventory={food:0,items:0};energy=100;spawn();msg('A new town has been generated.');render()});
+document.getElementById('home').addEventListener('click',()=>{mode='town';player={x:3,y:3};msg('Returned to the starting area.');render()});
+window.addEventListener('resize',render);
+render();
+})();
+</script>
+</body>
+</html>
