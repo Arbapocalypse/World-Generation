@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Procedural Tile RPG</title>
+<style>
+  :root { color-scheme: dark; --panel: rgba(17, 24, 39, .92); --line: #374151; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #111827; color: #f9fafb; font: 14px/1.4 system-ui, sans-serif; }
+  #game { display: block; width: 100%; height: 100%; image-rendering: pixelated; touch-action: none; }
+  .panel { position: fixed; z-index: 2; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; box-shadow: 0 8px 30px #0005; backdrop-filter: blur(8px); }
+  #hud { top: 12px; left: 12px; max-width: min(380px, calc(100vw - 24px)); }
+  #hud h1 { font-size: 16px; margin: 0 0 6px; }
+  #stats { color: #d1d5db; font-size: 12px; }
+  #legend { display: flex; flex-wrap: wrap; gap: 8px 12px; margin-top: 8px; font-size: 12px; }
+  .key { display: inline-flex; align-items: center; gap: 5px; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid #ffffff35; display: inline-block; }
+  #help { right: 12px; top: 12px; width: min(250px, calc(100vw - 24px)); font-size: 12px; color: #e5e7eb; }
+  #help strong { color: white; }
+  #mobile { position: fixed; z-index: 3; bottom: max(16px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); display: grid; grid-template-columns: repeat(3, 52px); grid-template-rows: repeat(2, 48px); gap: 5px; }
+  #mobile button, .action { border: 1px solid #6b7280; border-radius: 10px; color: white; background: #1f2937eF; font: inherit; font-size: 20px; touch-action: manipulation; }
+  #mobile button:active, .action:active { background: #4b5563; }
+  #up { grid-column: 2; grid-row: 1; } #left { grid-column: 1; grid-row: 2; } #down { grid-column: 2; grid-row: 2; } #right { grid-column: 3; grid-row: 2; }
+  #actions { display: flex; gap: 6px; margin-top: 9px; }
+  .action { font-size: 12px; padding: 7px 9px; }
+  @media (max-width: 600px) {
+    #help { top: auto; bottom: 130px; right: 10px; width: 155px; }
+    #hud { top: 10px; left: 10px; }
+    #legend { gap: 5px 8px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="game" aria-label="Tile-based RPG world"></canvas>
+
+<section id="hud" class="panel">
+  <h1>Procedural Tile RPG</h1>
+  <div id="stats">Loading world…</div>
+  <div id="legend">
+    <span class="key"><i class="swatch" style="background:#72b85a"></i>Grass</span>
+    <span class="key"><i class="swatch" style="background:#d9c27c"></i>Sand</span>
+    <span class="key"><i class="swatch" style="background:#438fc2"></i>Water</span>
+    <span class="key"><i class="swatch" style="background:#47764a"></i>Forest</span>
+    <span class="key"><i class="swatch" style="background:#858b95"></i>Mountain</span>
+    <span class="key"><i class="swatch" style="background:#b8a18a"></i>Path</span>
+  </div>
+  <div id="actions">
+    <button class="action" id="new-world">New world seed</button>
+    <button class="action" id="home">Return to start</button>
+  </div>
+</section>
+
+<aside id="help" class="panel">
+  <strong>Explore the world</strong><br>
+  Move with <strong>WASD</strong> or arrow keys. On mobile, use the direction pad below.<br>
+  <span style="color:#9ca3af">Water and mountains are blocked. The world generates as you explore.</span>
+</aside>
+
+<nav id="mobile" aria-label="Movement controls">
+  <button id="up" aria-label="Move up">▲</button>
+  <button id="left" aria-label="Move left">◀</button>
+  <button id="down" aria-label="Move down">▼</button>
+  <button id="right" aria-label="Move right">▶</button>
+</nav>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const stats = document.getElementById('stats');
+
+  const TILE = 32;
+  const COLORS = {
+    grass: '#72b85a', grassAlt: '#6bb052', sand: '#d9c27c',
+    water: '#438fc2', waterAlt: '#3e87b8', forest: '#47764a',
+    mountain: '#858b95', snow: '#cfd5dc', path: '#b8a18a'
+  };
+  const BLOCKED = new Set(['water', 'mountain']);
+  let seed = Math.floor(Math.random() * 1_000_000_000);
+  let player = { x: 0, y: 0 };
+  let viewW = innerWidth, viewH = innerHeight, dpr = 1;
+
+  // Stable integer hash: a tile always has the same result for a given seed + coordinates.
+  function hash2(x, y, salt = 0) {
+    let h = (Math.imul(x ^ (seed + salt), 374761393) + Math.imul(y, 668265263)) | 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    h = (h ^ (h >>> 16)) >>> 0;
+    return h / 4294967295;
+  }
+
+  // Smooth value noise. Sampling several scales creates large regions plus small variation.
+  function smooth(t) { return t * t * (3 - 2 * t); }
+  function valueNoise(x, y, scale, salt) {
+    const gx = Math.floor(x / scale), gy = Math.floor(y / scale);
+    const fx = smooth((x / scale) - gx), fy = smooth((y / scale) - gy);
+    const a = hash2(gx, gy, salt), b = hash2(gx + 1, gy, salt);
+    const c = hash2(gx, gy + 1, salt), d = hash2(gx + 1, gy + 1, salt);
+    const top = a + (b - a) * fx;
+    const bottom = c + (d - c) * fx;
+    return top + (bottom - top) * fy;
+  }
+
+  function terrainAt(x, y) {
+    // Broad land/water shapes, with finer noise for biome and coastline details.
+    const elevation = valueNoise(x, y, 15, 11) * 0.62
+                    + valueNoise(x, y, 7, 23) * 0.28
+                    + valueNoise(x, y, 3, 37) * 0.10;
+    const detail = valueNoise(x, y, 4, 51);
+    const biome = valueNoise(x, y, 11, 79);
+
+    if (elevation < 0.34) return 'water';
+    if (elevation < 0.39) return 'sand';
+    if (elevation > 0.70 && detail > 0.38) return 'mountain';
+    if (biome > 0.58 && elevation > 0.43 && elevation < 0.68) return 'forest';
+    return 'grass';
+  }
+
+  function tileAt(x, y) {
+    // Carve occasional winding paths over land, while keeping them deterministic.
+    const base = terrainAt(x, y);
+    if (base === 'water' || base === 'mountain') return base;
+    const curve = Math.sin((x + seed % 97) / 7) * 2.1;
+    const curve2 = Math.sin((x + seed % 43) / 15) * 1.4;
+    if (Math.abs(y - Math.round(curve + curve2)) < 1 && hash2(x, y, 101) > 0.25) return 'path';
+    return base;
+  }
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    viewW = window.innerWidth;
+    viewH = window.innerHeight;
+    canvas.width = Math.floor(viewW * dpr);
+    canvas.height = Math.floor(viewH * dpr);
+    canvas.style.width = viewW + 'px';
+    canvas.style.height = viewH + 'px';
+    render();
+  }
+
+  function drawTile(type, px, py, tx, ty) {
+    const variation = hash2(tx, ty, 137) > 0.5;
+    let color = COLORS[type] || COLORS.grass;
+    if (type === 'grass' && variation) color = COLORS.grassAlt;
+    if (type === 'water' && variation) color = COLORS.waterAlt;
+    ctx.fillStyle = color;
+    ctx.fillRect(px, py, TILE + 1, TILE + 1);
+
+    // Tiny marks help simple-color tiles feel less flat.
+    const r = hash2(tx, ty, 191);
+    if (type === 'grass' && r > 0.72) {
+      ctx.fillStyle = '#4d9848';
+      ctx.fillRect(px + 7 + r * 8, py + 8, 3, 3);
+    } else if (type === 'forest') {
+      ctx.fillStyle = '#315d3b';
+      ctx.fillRect(px + 8, py + 7, 16, 16);
+      ctx.fillStyle = '#5e9654';
+      ctx.fillRect(px + 11, py + 9, 10, 10);
+      ctx.fillStyle = '#315d3b';
+      ctx.fillRect(px + 14, py + 23, 5, 5);
+    } else if (type === 'mountain') {
+      ctx.fillStyle = '#6c737e';
+      ctx.beginPath();
+      ctx.moveTo(px + 4, py + 27);
+      ctx.lineTo(px + 16, py + 5);
+      ctx.lineTo(px + 28, py + 27);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = COLORS.snow;
+      ctx.beginPath();
+      ctx.moveTo(px + 12, py + 13);
+      ctx.lineTo(px + 16, py + 5);
+      ctx.lineTo(px + 21, py + 15);
+      ctx.lineTo(px + 17, py + 13);
+      ctx.lineTo(px + 15, py + 16);
+      ctx.closePath();
+      ctx.fill();
+    } else if (type === 'water' && r > 0.38) {
+      ctx.fillStyle = '#8bc5e3';
+      ctx.fillRect(px + 5, py + 10 + r * 8, 9, 2);
+    } else if (type === 'path') {
+      ctx.fillStyle = '#a28b72';
+      ctx.fillRect(px + 4, py + 13, 5, 3);
+      ctx.fillRect(px + 22, py + 22, 4, 3);
+    }
+  }
+
+  function render() {
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, viewW, viewH);
+
+    const tilesX = Math.ceil(viewW / TILE) + 2;
+    const tilesY = Math.ceil(viewH / TILE) + 2;
+    const startX = Math.floor(player.x - tilesX / 2);
+    const startY = Math.floor(player.y - tilesY / 2);
+    const offsetX = Math.floor(viewW / 2 - player.x * TILE);
+    const offsetY = Math.floor(viewH / 2 - player.y * TILE);
+
+    for (let y = startY; y < startY + tilesY; y++) {
+      for (let x = startX; x < startX + tilesX; x++) {
+        const px = x * TILE + offsetX;
+        const py = y * TILE + offsetY;
+        drawTile(tileAt(x, y), px, py, x, y);
+      }
+    }
+
+    // Player is rendered above the terrain, centered on the current tile.
+    const cx = viewW / 2, cy = viewH / 2;
+    ctx.fillStyle = '#18212d';
+    ctx.fillRect(cx - 8, cy - 7, 16, 17);
+    ctx.fillStyle = '#f4c9a1';
+    ctx.fillRect(cx - 6, cy - 12, 12, 10);
+    ctx.fillStyle = '#344e9b';
+    ctx.fillRect(cx - 8, cy + 1, 16, 9);
+    ctx.fillStyle = '#f9fafb';
+    ctx.fillRect(cx - 3, cy - 8, 2, 2);
+    ctx.fillRect(cx + 2, cy - 8, 2, 2);
+
+    const current = tileAt(player.x, player.y);
+    stats.textContent = `Seed ${seed} · Tile (${player.x}, ${player.y}) · ${current}`;
+  }
+
+  function move(dx, dy) {
+    const nx = player.x + dx, ny = player.y + dy;
+    if (!BLOCKED.has(tileAt(nx, ny))) {
+      player.x = nx;
+      player.y = ny;
+    }
+    render();
+  }
+
+  const keys = {
+    ArrowUp: [0, -1], w: [0, -1], W: [0, -1],
+    ArrowDown: [0, 1], s: [0, 1], S: [0, 1],
+    ArrowLeft: [-1, 0], a: [-1, 0], A: [-1, 0],
+    ArrowRight: [1, 0], d: [1, 0], D: [1, 0]
+  };
+  window.addEventListener('keydown', e => {
+    if (keys[e.key]) {
+      e.preventDefault();
+      move(...keys[e.key]);
+    }
+  }, { passive: false });
+
+  document.getElementById('up').addEventListener('click', () => move(0, -1));
+  document.getElementById('down').addEventListener('click', () => move(0, 1));
+  document.getElementById('left').addEventListener('click', () => move(-1, 0));
+  document.getElementById('right').addEventListener('click', () => move(1, 0));
+
+  document.getElementById('new-world').addEventListener('click', () => {
+    seed = Math.floor(Math.random() * 1_000_000_000);
+    player = { x: 0, y: 0 };
+    // Find nearby walkable starting tile if the origin is impassable.
+    if (BLOCKED.has(tileAt(player.x, player.y))) {
+      for (let radius = 1; radius < 20; radius++) {
+        let found = false;
+        for (let y = -radius; y <= radius && !found; y++) {
+          for (let x = -radius; x <= radius; x++) {
+            if (!BLOCKED.has(tileAt(x, y))) {
+              player = { x, y }; found = true; break;
+            }
+          }
+        }
+        if (found) break;
+      }
+    }
+    render();
+  });
+  document.getElementById('home').addEventListener('click', () => {
+    player = { x: 0, y: 0 };
+    if (BLOCKED.has(tileAt(0, 0))) {
+      for (let radius = 1; radius < 20; radius++) {
+        let found = false;
+        for (let y = -radius; y <= radius && !found; y++) {
+          for (let x = -radius; x <= radius; x++) {
+            if (!BLOCKED.has(tileAt(x, y))) {
+              player = { x, y }; found = true; break;
+            }
+          }
+        }
+        if (found) break;
+      }
+    }
+    render();
+  });
+
+  window.addEventListener('resize', resize);
+  // Ensure the initial spawn is walkable.
+  if (BLOCKED.has(tileAt(0, 0))) {
+    outer: for (let radius = 1; radius < 20; radius++) {
+      for (let y = -radius; y <= radius; y++) {
+        for (let x = -radius; x <= radius; x++) {
+          if (!BLOCKED.has(tileAt(x, y))) { player = { x, y }; break outer; }
+        }
+      }
+    }
+  }
+  resize();
+})();
+</script>
+</body>
+</html>
